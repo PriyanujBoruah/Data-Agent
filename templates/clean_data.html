@@ -1,0 +1,462 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Clean Data</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.3/font/bootstrap-icons.css"> <!-- For Icons -->
+    <style>
+        body { padding-top: 5rem; } /* Adjust for fixed navbar */
+        .main-container { display: flex; height: calc(100vh - 5rem); } /* Full height minus navbar */
+        .sidebar { width: 280px; padding: 1rem; border-right: 1px solid #dee2e6; overflow-y: auto; background-color: #f8f9fa; }
+        .content { flex-grow: 1; padding: 1rem; overflow-y: auto; display: flex; flex-direction: column; }
+        .table-container { flex-grow: 1; overflow: auto; border: 1px solid #dee2e6; margin-bottom: 1rem;}
+        .table-sm th { position: sticky; top: 0; background-color: #e9ecef; z-index: 1; } /* Sticky header */
+        .status-bar { font-size: 0.9em; color: #6c757d; margin-top: auto; padding-top: 0.5rem; border-top: 1px solid #dee2e6;}
+        .cleaning-control { margin-bottom: 1rem; padding-bottom: 1rem; border-bottom: 1px dashed #ccc; }
+        .form-label { font-weight: 500; }
+        #loading-indicator { display: none; /* Hidden by default */ }
+        .toast-container { position: fixed; top: 60px; right: 20px; z-index: 1055; }
+    </style>
+</head>
+<body>
+
+    <!-- Fixed Navbar -->
+    <nav class="navbar navbar-expand-md navbar-dark fixed-top bg-dark">
+        <div class="container-fluid">
+            <a class="navbar-brand" href="{{ url_for('index') }}">Data Cleaner</a>
+             <div class="ms-auto d-flex align-items-center">
+                <button type="button" class="btn btn-sm btn-outline-warning ms-3" id="suggest-cleaning-btn" title="Analyze data and suggest cleaning steps">
+                    <i class="bi bi-lightbulb"></i> Suggest Cleaning
+                 </button>
+                <button type="button" class="btn btn-sm btn-outline-danger ms-2" id="auto-clean-btn" title="Apply automatic, non-destructive cleaning steps (whitespace, type conversion, case)">
+                    <i class="bi bi-magic"></i> Auto Clean
+                </button>
+                <!-- Undo/Redo Buttons -->
+                <button id="undo-btn" class="btn btn-outline-secondary btn-sm me-2" {% if not undo_redo_status.undo_enabled %}disabled{% endif %}>
+                    <i class="bi bi-arrow-counterclockwise"></i> Undo
+                </button>
+                <button id="redo-btn" class="btn btn-outline-secondary btn-sm me-3" {% if not undo_redo_status.redo_enabled %}disabled{% endif %}>
+                    <i class="bi bi-arrow-clockwise"></i> Redo
+                </button>
+
+                <!-- Save Button -->
+                <div class="input-group input-group-sm me-2" style="width: auto;">
+                     <input type="text" id="save-filename" class="form-control form-control-sm" placeholder="Optional: filename.pkl" value="{{ saved_filename if saved_filename else '' }}">
+                     <button id="save-btn" class="btn btn-outline-info">
+                         <i class="bi bi-save"></i> Save
+                     </button>
+                </div>
+
+                <!-- Download Dropdown -->
+                <div class="dropdown">
+                    <button class="btn btn-success btn-sm dropdown-toggle" type="button" id="downloadDropdown" data-bs-toggle="dropdown" aria-expanded="false">
+                       <i class="bi bi-download"></i> Download
+                    </button>
+                    <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="downloadDropdown">
+                        <li><a class="dropdown-item" href="{{ url_for('download_file', filetype='csv') }}">Download as CSV</a></li>
+                        <li><a class="dropdown-item" href="{{ url_for('download_file', filetype='xlsx') }}">Download as XLSX</a></li>
+                    </ul>
+                </div>
+                 <a href="{{ url_for('index') }}" class="btn btn-outline-light btn-sm ms-3">
+                     <i class="bi bi-house"></i> Home
+                 </a>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Content Area -->
+    <div class="main-container">
+        <!-- Sidebar with Cleaning Controls -->
+        <aside class="sidebar">
+            <h5><i class="bi bi-tools"></i> Cleaning Tools</h5>
+            <hr>
+
+            <!-- === Duplicates === -->
+            <div class="cleaning-control">
+                <label class="form-label">Duplicates</label>
+                <button class="btn btn-sm btn-warning w-100" data-action="remove_duplicates" title="Remove rows that are exact duplicates across all columns. Keeps the first occurrence.">
+                    Remove Duplicate Rows (All Columns)
+                </button>
+                <!-- Advanced: Add multi-select for subset -->
+                <div class="form-text">Removes entire rows if they are identical.</div>
+            </div>
+
+            <!-- === Missing Values === -->
+            <div class="cleaning-control">
+                 <label class="form-label">Missing Values</label>
+                 <button class="btn btn-sm btn-warning w-100 mb-2" data-action="remove_missing" data-params='{"how": "any"}' title="Remove rows that contain ANY missing value (NaN, None, NaT).">
+                    Remove Rows with Any Missing
+                 </button>
+                  <div class="form-text mb-2">Removes entire rows with nulls.</div>
+
+                 <label for="fill-missing-column" class="form-label">Fill Missing Values</label>
+                 <div class="input-group input-group-sm mb-1">
+                    <select class="form-select form-select-sm" id="fill-missing-column">
+                        <option value="" selected>-- Fill All Columns --</option>
+                        {% for col in columns %}
+                        <option value="{{ col }}">{{ col }}</option>
+                        {% endfor %}
+                    </select>
+                 </div>
+                 <div class="input-group input-group-sm">
+                    <input type="text" class="form-control form-control-sm" id="fill-missing-value" placeholder="Value to fill with" title="Enter the value to replace missing data. Type will be inferred if possible.">
+                    <button class="btn btn-outline-secondary" type="button" data-action="fill_missing">Fill</button>
+                 </div>
+                 <!-- Advanced: Add mean/median/mode/ffill/bfill options -->
+            </div>
+
+             <!-- === Whitespace === -->
+             <div class="cleaning-control">
+                 <label for="remove-spaces-column" class="form-label">Trim Whitespace</label>
+                 <div class="input-group input-group-sm">
+                     <select class="form-select form-select-sm" id="remove-spaces-column" required>
+                         <option value="" selected disabled>-- Select Text Column --</option>
+                         {% for col in columns %}
+                         <option value="{{ col }}">{{ col }}</option>
+                         {% endfor %}
+                     </select>
+                     <button class="btn btn-outline-secondary" type="button" data-action="remove_spaces" title="Remove leading/trailing spaces from text columns.">Trim</button>
+                 </div>
+                 <div class="form-text">Only applicable to text columns.</div>
+             </div>
+
+            <!-- === Data Types & Formats === -->
+            <div class="cleaning-control">
+                 <label class="form-label">Convert Data Type</label>
+                 <div class="input-group input-group-sm mb-1">
+                      <select class="form-select form-select-sm" id="change-dtype-column" required>
+                          <option value="" selected disabled>-- Select Column --</option>
+                          {% for col in columns %}
+                          <option value="{{ col }}">{{ col }}</option>
+                          {% endfor %}
+                     </select>
+                 </div>
+                 <div class="input-group input-group-sm">
+                     <select class="form-select form-select-sm" id="change-dtype-target-type" required>
+                          <option value="" selected disabled>-- To Type --</option>
+                          <option value="string">Text (String)</option>
+                          <option value="integer">Integer (Whole Number)</option>
+                          <option value="float">Decimal (Float)</option>
+                          <option value="datetime">Date/Time</option>
+                          <option value="boolean">Boolean (True/False)</option>
+                          <option value="category">Category (Optimize Text)</option>
+                     </select>
+                     <button class="btn btn-outline-secondary" type="button" data-action="change_dtype" title="Attempt to convert column to selected type. Invalid values may become null.">Convert</button>
+                 </div>
+                 <div class="form-text mb-2">Use Date/Time tools for specific date formats.</div>
+
+                 <label class="form-label">Convert to Date/Time</label>
+                 <div class="input-group input-group-sm mb-1">
+                     <select class="form-select form-select-sm" id="fix-datetime-column" required>
+                          <option value="" selected disabled>-- Select Column --</option>
+                          {% for col in columns %}
+                          <option value="{{ col }}">{{ col }}</option>
+                          {% endfor %}
+                     </select>
+                 </div>
+                 <div class="input-group input-group-sm">
+                     <input type="text" class="form-control form-control-sm" id="fix-datetime-format" placeholder="Optional format (e.g., %Y-%m-%d)" title="Python strptime format. Leave blank to auto-detect.">
+                     <button class="btn btn-outline-secondary" type="button" data-action="fix_datetime" title="Attempt conversion to datetime. Invalid values become NaT (null).">Parse Dates</button>
+                 </div>
+            </div>
+
+             <!-- === ID Checks === -->
+            <div class="cleaning-control">
+                <label class="form-label">Check IDs / Values</label>
+                 <div class="input-group input-group-sm mb-2">
+                     <select class="form-select form-select-sm" id="check-id-uniqueness-column" required>
+                          <option value="" selected disabled>-- Select Column --</option>
+                          {% for col in columns %}
+                          <option value="{{ col }}">{{ col }}</option>
+                          {% endfor %}
+                     </select>
+                     <button class="btn btn-outline-info" type="button" data-action="check_id_uniqueness" title="Check if all values in the column are unique. Does not modify data.">Check Uniqueness</button>
+                 </div>
+
+                 <div class="input-group input-group-sm mb-1">
+                     <select class="form-select form-select-sm" id="check-id-format-column" required>
+                          <option value="" selected disabled>-- Select Column --</option>
+                          {% for col in columns %}
+                          <option value="{{ col }}">{{ col }}</option>
+                          {% endfor %}
+                     </select>
+                 </div>
+                 <div class="input-group input-group-sm">
+                      <input type="text" class="form-control form-control-sm" id="check-id-format-pattern" placeholder="Regex pattern (e.g., \d{3}-\d{2})" title="Python Regex. Will check if entire cell value matches." required>
+                     <button class="btn btn-outline-info" type="button" data-action="check_id_format" title="Check if values match the regex pattern. Does not modify data.">Check Format</button>
+                 </div>
+            </div>
+
+             <!-- === Outliers === -->
+            <div class="cleaning-control">
+                <label class="form-label">Numerical Outliers (IQR)</label>
+                 <div class="input-group input-group-sm mb-1">
+                     <select class="form-select form-select-sm" id="outlier-iqr-column" required>
+                          <option value="" selected disabled>-- Select Numeric Column --</option>
+                          {% for col in columns %}
+                          <option value="{{ col }}">{{ col }}</option>
+                          {% endfor %}
+                     </select>
+                 </div>
+                 <div class="input-group input-group-sm">
+                     <span class="input-group-text">Factor</span>
+                     <input type="number" class="form-control form-control-sm" id="outlier-iqr-factor" value="1.5" step="0.1" min="0.1" title="Standard factor is 1.5. Multiplies IQR.">
+                     <button class="btn btn-outline-warning" type="button" data-action="remove_outliers_iqr" title="Remove rows where value is outside Q1 - factor*IQR or Q3 + factor*IQR.">Remove</button>
+                     <button class="btn btn-outline-secondary" type="button" data-action="clip_outliers_iqr" title="Replace outlier values with the calculated lower/upper bound.">Clip</button>
+                 </div>
+                 <div class="form-text">Uses Interquartile Range (IQR) method.</div>
+            </div>
+
+             <!-- === Filtering === -->
+            <div class="cleaning-control">
+                <label class="form-label">Filter Rows</label>
+                <div class="input-group input-group-sm mb-1">
+                     <select class="form-select form-select-sm" id="filter-rows-column" required>
+                          <option value="" selected disabled>-- Select Column --</option>
+                          {% for col in columns %}
+                          <option value="{{ col }}">{{ col }}</option>
+                          {% endfor %}
+                     </select>
+                    <select class="form-select form-select-sm" id="filter-rows-condition" required title="Select the comparison condition.">
+                        <option value="" selected disabled>-- Condition --</option>
+                        <option value="==">Equals (=)</option>
+                        <option value="!=">Not Equals (!=)</option>
+                        <option value=">">Greater Than (>)</option>
+                        <option value="<">Less Than (<)</option>
+                        <option value=">=">Greater Than or Equals (>=)</option>
+                        <option value="<=">Less Than or Equals (<=)</option>
+                        <option value="contains">Contains (text)</option>
+                        <option value="startswith">Starts With (text)</option>
+                        <option value="endswith">Ends With (text)</option>
+                        <option value="isnull">Is Null (Missing)</option>
+                        <option value="notnull">Is Not Null</option>
+                    </select>
+                </div>
+                 <div class="input-group input-group-sm">
+                     <input type="text" class="form-control form-control-sm" id="filter-rows-value" placeholder="Value (if needed)" title="Value for comparison. Not needed for Is Null/Not Null. Type inferred if possible.">
+                     <select class="form-select form-select-sm" id="filter-rows-action">
+                         <option value="keep" selected>Keep Matches</option>
+                         <option value="remove">Remove Matches</option>
+                     </select>
+                     <button class="btn btn-outline-primary" type="button" data-action="filter_rows">Filter</button>
+                </div>
+                <div class="form-text">Keeps or removes rows based on the condition.</div>
+            </div>
+
+            <!-- === Column Transformation === -->
+            <div class="cleaning-control">
+                <label class="form-label">Split Column</label>
+                 <div class="input-group input-group-sm mb-1">
+                     <select class="form-select form-select-sm" id="split-column-column" required>
+                          <option value="" selected disabled>-- Select Text Column --</option>
+                          {% for col in columns %}
+                          <option value="{{ col }}">{{ col }}</option>
+                          {% endfor %}
+                     </select>
+                     <input type="text" class="form-control form-control-sm" id="split-column-delimiter" placeholder="Delimiter" title="Character(s) to split by (e.g., ',', '-', ' ')." required>
+                 </div>
+                 <div class="input-group input-group-sm">
+                     <input type="text" class="form-control form-control-sm" id="split-column-new-names" placeholder="New names (comma-sep, optional)" title="Comma-separated names for the new columns. If blank, defaults like col_split_1 are used.">
+                     <button class="btn btn-outline-secondary" type="button" data-action="split_column">Split</button>
+                 </div>
+                 <div class="form-text">Splits text into multiple new columns.</div>
+            </div>
+
+            <div class="cleaning-control">
+                <label class="form-label">Combine Columns</label>
+                <div class="mb-1">
+                    <label for="combine-columns-cols" class="form-label" style="font-size:0.85em;">Columns to Combine:</label>
+                    <select class="form-select form-select-sm" id="combine-columns-cols" multiple required title="Select two or more columns to combine (Ctrl/Cmd + Click).">
+                        {% for col in columns %}
+                        <option value="{{ col }}">{{ col }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                 <div class="input-group input-group-sm mb-1">
+                      <span class="input-group-text">New Name</span>
+                      <input type="text" class="form-control form-control-sm" id="combine-columns-new-name" placeholder="Required" required>
+                 </div>
+                 <div class="input-group input-group-sm">
+                      <span class="input-group-text">Separator</span>
+                      <input type="text" class="form-control form-control-sm" id="combine-columns-separator" placeholder="Optional (e.g., ' ', '-')">
+                      <button class="btn btn-outline-secondary" type="button" data-action="combine_columns">Combine</button>
+                 </div>
+                 <div class="form-text">Joins multiple columns into one new column.</div>
+            </div>
+
+             <!-- === Column Management === -->
+            <div class="cleaning-control">
+                <label class="form-label">Manage Columns</label>
+                <div class="input-group input-group-sm mb-2">
+                     <select class="form-select form-select-sm" id="rename-column-old-name" required>
+                          <option value="" selected disabled>-- Column to Rename --</option>
+                          {% for col in columns %}
+                          <option value="{{ col }}">{{ col }}</option>
+                          {% endfor %}
+                     </select>
+                    <input type="text" class="form-control form-control-sm" id="rename-column-new-name" placeholder="New Column Name" required>
+                    <button class="btn btn-outline-secondary" type="button" data-action="rename_column">Rename</button>
+                </div>
+
+                <div class="mb-1">
+                    <label for="drop-columns-cols" class="form-label" style="font-size:0.85em;">Columns to Drop:</label>
+                    <select class="form-select form-select-sm" id="drop-columns-cols" multiple required title="Select one or more columns to remove (Ctrl/Cmd + Click).">
+                        {% for col in columns %}
+                        <option value="{{ col }}">{{ col }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <button class="btn btn-sm btn-danger w-100" data-action="drop_columns" title="Permanently remove selected columns.">Drop Selected Columns</button>
+            </div>
+
+             <!-- === String Manipulation === -->
+            <div class="cleaning-control">
+                 <label class="form-label">Find & Replace Text</label>
+                 <div class="input-group input-group-sm mb-1">
+                      <select class="form-select form-select-sm" id="replace-text-column" required>
+                          <option value="" selected disabled>-- Select Text Column --</option>
+                          {% for col in columns %}
+                          <option value="{{ col }}">{{ col }}</option>
+                          {% endfor %}
+                     </select>
+                 </div>
+                 <div class="input-group input-group-sm mb-1">
+                     <input type="text" class="form-control form-control-sm" id="replace-text-find" placeholder="Find Text" title="Text or Regex pattern to find." required>
+                     <input type="text" class="form-control form-control-sm" id="replace-text-replace" placeholder="Replace With" title="Text to replace matches with.">
+                 </div>
+                 <div class="input-group input-group-sm">
+                     <div class="input-group-text">
+                        <input class="form-check-input mt-0" type="checkbox" id="replace-text-regex" title="Check to treat 'Find Text' as a Regex pattern.">
+                        <label class="form-check-label ms-2" for="replace-text-regex" style="font-size:0.85em;">Use Regex</label>
+                     </div>
+                     <button class="btn btn-outline-secondary" type="button" data-action="replace_text">Replace</button>
+                 </div>
+            </div>
+
+            <div class="cleaning-control">
+                <label class="form-label">Change Text Case</label>
+                 <div class="input-group input-group-sm">
+                      <select class="form-select form-select-sm" id="change-case-column" required>
+                          <option value="" selected disabled>-- Select Text Column --</option>
+                          {% for col in columns %}
+                          <option value="{{ col }}">{{ col }}</option>
+                          {% endfor %}
+                     </select>
+                      <select class="form-select form-select-sm" id="change-case-type" required>
+                          <option value="" selected disabled>-- Case Type --</option>
+                          <option value="lower">lowercase</option>
+                          <option value="upper">UPPERCASE</option>
+                          <option value="title">Title Case</option>
+                     </select>
+                     <button class="btn btn-outline-secondary" type="button" data-action="change_case">Change Case</button>
+                 </div>
+            </div>
+
+            <!-- === Value Mapping (Simplified UI) === -->
+            <div class="cleaning-control">
+                 <label for="map-values-column" class="form-label">Map Values</label>
+                  <div class="input-group input-group-sm mb-1">
+                      <select class="form-select form-select-sm" id="map-values-column" required>
+                          <option value="" selected disabled>-- Select Column --</option>
+                          {% for col in columns %}
+                          <option value="{{ col }}">{{ col }}</option>
+                          {% endfor %}
+                     </select>
+                 </div>
+                 <textarea class="form-control form-control-sm mb-1" id="map-values-dict" rows="3" placeholder='Enter JSON map, e.g.: {"old_val1": "new_val", "old_val2": 123}' title='Enter a JSON object mapping old values (keys) to new values (values). Keys/values should be quoted appropriately.' required></textarea>
+                 <button class="btn btn-outline-secondary w-100 btn-sm" type="button" data-action="map_values">Map/Replace Values</button>
+                 <div class="form-text">Replaces values based on the provided JSON mapping.</div>
+            </div>
+
+            <!-- === Sorting === -->
+            <div class="cleaning-control">
+                <label class="form-label">Sort Data</label>
+                 <div class="mb-1">
+                    <label for="sort-values-cols" class="form-label" style="font-size:0.85em;">Sort By Columns:</label>
+                    <select class="form-select form-select-sm" id="sort-values-cols" multiple required title="Select one or more columns to sort by (Ctrl/Cmd + Click). Order matters.">
+                        {% for col in columns %}
+                        <option value="{{ col }}">{{ col }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                 <div class="input-group input-group-sm">
+                     <select class="form-select form-select-sm" id="sort-values-ascending" title="Select sort order. Applies to all selected columns (or provide list via advanced JS).">
+                         <option value="true" selected>Ascending (A-Z, 1-9)</option>
+                         <option value="false">Descending (Z-A, 9-1)</option>
+                     </select>
+                     <button class="btn btn-outline-primary" type="button" data-action="sort_values">Sort</button>
+                 </div>
+                 <div class="form-text">Sorts the entire dataset based on selected columns.</div>
+            </div>
+
+
+        </aside> <!-- End Sidebar -->
+        <!-- ================================================== -->
+
+        <!-- Main Content Area (Table) -->
+        <main class="content">
+            <h5 id="source-info-display">Source: {{ source_info }}</h5>
+            <p class="text-muted" id="saved-file-info">
+                 {% if saved_filename %}
+                    <i class="bi bi-info-circle"></i> Currently working on saved file: {{ saved_filename }}
+                 {% endif %}
+            </p>
+            <div id="loading-indicator" class="text-center my-3">
+                <div class="spinner-border text-primary" role="status">
+                    <span class="visually-hidden">Loading...</span>
+                </div>
+            </div>
+            <div id="data-table-container" class="table-container">
+                {{ table_html | safe }}
+            </div>
+            <div class="status-bar">
+                <!-- Use total_rows and total_columns passed from Flask initially -->
+                <span id="row-count">Rows: {{ total_rows if total_rows is defined else 'N/A' }}</span> |
+                <span id="col-count">Columns: {{ total_columns if total_columns is defined else 'N/A' }}</span>
+                <span id="message-area" class="ms-3 text-success fw-bold"></span>
+                <span id="error-area" class="ms-3 text-danger fw-bold"></span>
+           </div>
+        </main>
+    </div>
+
+     <!-- Toast Container for Notifications -->
+    <div class="toast-container"></div>
+    <!-- ================================================== -->
+    <!-- Suggestions Modal                                -->
+    <!-- ================================================== -->
+    <div class="modal fade" id="suggestionsModal" tabindex="-1" aria-labelledby="suggestionsModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-lg modal-dialog-scrollable">
+          <div class="modal-content">
+            <div class="modal-header">
+              <h5 class="modal-title" id="suggestionsModalLabel"><i class="bi bi-lightbulb"></i> Cleaning Suggestions</h5>
+              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+              <div id="suggestions-loading" class="text-center" style="display: none;">
+                  <div class="spinner-border text-primary" role="status">
+                      <span class="visually-hidden">Analyzing...</span>
+                  </div>
+                  <p>Analyzing data...</p>
+              </div>
+              <div id="suggestions-error" class="alert alert-danger" style="display: none;">
+                  Error loading suggestions.
+              </div>
+              <div id="suggestions-list">
+                <!-- Suggestions will be loaded here by JavaScript -->
+                <p class="text-muted" id="no-suggestions-msg" style="display: none;">No specific cleaning suggestions found based on automated checks. Manual review is still recommended.</p>
+              </div>
+            </div>
+            <div class="modal-footer">
+              <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+            </div>
+          </div>
+        </div>
+    </div>
+
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="{{ url_for('static', filename='js/cleaning.js') }}"></script>
+</body>
+</html>

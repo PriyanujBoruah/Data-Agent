@@ -1,0 +1,6 @@
+{# templates/_data_table.html #}
+{% if df is not none and not df.empty %}
+    {{ df.head(50).to_html(classes='table table-striped table-bordered table-hover table-sm', index=False, border=0, escape=True, na_rep='<i class="text-muted">NULL</i>') | safe }}
+{% else %}
+    <p class="text-center text-muted p-4">No data to display or data is empty.</p>
+{% endif %}
