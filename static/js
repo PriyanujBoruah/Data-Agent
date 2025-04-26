@@ -1,0 +1,579 @@
+// static/js/cleaning.js
+
+document.addEventListener('DOMContentLoaded', () => {
+    // --- DOM Element References ---
+    const tableContainer = document.getElementById('data-table-container');
+    const loadingIndicator = document.getElementById('loading-indicator');
+    const messageArea = document.getElementById('message-area');
+    const errorArea = document.getElementById('error-area');
+    const undoBtn = document.getElementById('undo-btn');
+    const redoBtn = document.getElementById('redo-btn');
+    const saveBtn = document.getElementById('save-btn');
+    const saveFilenameInput = document.getElementById('save-filename');
+    const savedFileInfo = document.getElementById('saved-file-info');
+    const rowCountSpan = document.getElementById('row-count');
+    const colCountSpan = document.getElementById('col-count');
+    const sidebar = document.querySelector('.sidebar');
+    const toastContainer = document.querySelector('.toast-container');
+    const sourceInfoDisplay = document.getElementById('source-info-display'); // Added
+
+    const suggestBtn = document.getElementById('suggest-cleaning-btn');
+    const suggestionsModalElement = document.getElementById('suggestionsModal');
+    const suggestionsListDiv = document.getElementById('suggestions-list');
+    const suggestionsLoadingDiv = document.getElementById('suggestions-loading');
+    const suggestionsErrorDiv = document.getElementById('suggestions-error');
+    const noSuggestionsMsg = document.getElementById('no-suggestions-msg');
+
+    const autoCleanBtn = document.getElementById('auto-clean-btn');
+
+    let suggestionsModal = null; // Bootstrap Modal instance
+    
+    // Initialize Bootstrap Modal instance
+    if (suggestionsModalElement) {
+        suggestionsModal = new bootstrap.Modal(suggestionsModalElement);
+     }
+
+    // --- Helper Functions ---
+
+    function showLoading() {
+        loadingIndicator.style.display = 'block';
+        if (tableContainer) tableContainer.style.opacity = '0.5'; // Dim table while loading
+    }
+
+    function hideLoading() {
+        loadingIndicator.style.display = 'none';
+        if (tableContainer) tableContainer.style.opacity = '1';
+    }
+
+    function updateTableAndStatus(data) {
+        // --- Update Table HTML ---
+        if (data.table_html && tableContainer) {
+            tableContainer.innerHTML = data.table_html;
+        }
+
+        // --- Update Row and Column Counts (using total counts from response) ---
+        if (data.total_rows !== undefined && rowCountSpan) { // Check if key exists
+             rowCountSpan.textContent = `Rows: ${data.total_rows}`;
+        }
+        if (data.total_columns !== undefined && colCountSpan) { // Check if key exists
+             colCountSpan.textContent = `Columns: ${data.total_columns}`;
+             // Also update column selectors if columns array is present
+             if (data.columns) {
+                 updateColumnSelectors(data.columns);
+             }
+        }
+         // --- Handle columns update even if total_columns is missing (fallback) ---
+         else if (data.columns && colCountSpan) {
+             colCountSpan.textContent = `Columns: ${data.columns.length}`;
+             updateColumnSelectors(data.columns);
+         }
+
+
+        // --- Update Buttons and Messages ---
+        if (data.undo_redo_status) {
+            updateUndoRedoButtons(data.undo_redo_status);
+        }
+        if (data.message) {
+            // Only display toast if message is not just about no change
+            if (!data.df_modified === false) {
+                 displayToast(data.message, 'success');
+            }
+            messageArea.textContent = data.message; // Always show in status bar
+            errorArea.textContent = ''; // Clear previous errors
+        }
+         if (data.error) { // Handle errors returned in successful responses
+             handleError(data, null);
+         }
+        if (data.saved_filename) {
+             saveFilenameInput.value = data.saved_filename;
+             savedFileInfo.innerHTML = `<i class="bi bi-info-circle"></i> Current state saved as: ${data.saved_filename}`;
+             savedFileInfo.classList.remove('text-muted');
+             savedFileInfo.classList.add('text-info');
+        }
+    }
+
+    function getSelectedOptions(selectElement) {
+        // Helper to get array of values from a multi-select
+        if (!selectElement) return [];
+        return Array.from(selectElement.selectedOptions).map(option => option.value);
+    }
+
+    function updateColumnSelectors(columns) {
+        // Find all select elements in the sidebar likely used for column selection
+        const selects = sidebar.querySelectorAll('select');
+        selects.forEach(select => {
+            // Heuristic: If a select has options that match old column names, update it.
+            // More robust: Give column selects a specific class or data attribute.
+            // For now, let's update all selects that aren't specifically for conditions/types etc.
+             const nonColumnSelectIds = ['fill-missing-column', 'remove-spaces-column', 'change-dtype-column', 'fix-datetime-column', 'check-id-uniqueness-column', 'check-id-format-column', 'outlier-iqr-column', 'filter-rows-column', 'filter-rows-condition', 'filter-rows-action', 'split-column-column', 'combine-columns-cols', 'rename-column-old-name', 'drop-columns-cols', 'replace-text-column', 'change-case-column', 'change-case-type', 'map-values-column', 'sort-values-cols', 'sort-values-ascending'];
+
+            if (select.multiple || nonColumnSelectIds.includes(select.id) || select.id.endsWith('-column') || select.id.includes('-cols')) { // Include multi-selects and common ID patterns
+                 const currentValues = select.multiple ? getSelectedOptions(select) : [select.value]; // Preserve selection(s)
+                 let placeholderOption = select.querySelector('option[value=""][disabled]'); // Standard placeholder
+                 if (!placeholderOption) placeholderOption = select.querySelector('option[value=""]'); // E.g., "All columns"
+
+                 select.innerHTML = ''; // Clear all
+                 if (placeholderOption) select.appendChild(placeholderOption.cloneNode(true)); // Re-add placeholder
+
+                 columns.forEach(col => {
+                    const option = document.createElement('option');
+                    option.value = col;
+                    option.textContent = col;
+                    select.appendChild(option);
+                });
+
+                // Try to restore previous selection(s)
+                if (select.multiple) {
+                     Array.from(select.options).forEach(option => {
+                         if (currentValues.includes(option.value)) {
+                             option.selected = true;
+                         }
+                     });
+                 } else if (columns.includes(currentValues[0])) {
+                     select.value = currentValues[0];
+                 } else if (placeholderOption) {
+                     select.value = placeholderOption.value; // Reset to placeholder if old col is gone
+                 }
+            }
+        });
+    }
+
+
+    function updateUndoRedoButtons(status) {
+        if (undoBtn) undoBtn.disabled = !status.undo_enabled;
+        if (redoBtn) redoBtn.disabled = !status.redo_enabled;
+    }
+
+     function displayToast(message, type = 'info') {
+        const toastId = 'toast-' + Date.now();
+         // Determine background color based on type
+         let bgColor = 'bg-primary'; // Default info
+         if (type === 'success') bgColor = 'bg-success';
+         else if (type === 'error') bgColor = 'bg-danger';
+         else if (type === 'warning') bgColor = 'bg-warning text-dark'; // Dark text for warning
+
+        const toastHTML = `
+            <div id="${toastId}" class="toast align-items-center text-white ${bgColor} border-0" role="alert" aria-live="assertive" aria-atomic="true">
+              <div class="d-flex">
+                <div class="toast-body">
+                  ${message}
+                </div>
+                <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
+              </div>
+            </div>
+        `;
+        if (toastContainer) {
+             toastContainer.insertAdjacentHTML('beforeend', toastHTML);
+             const toastElement = document.getElementById(toastId);
+             if (toastElement) {
+                  const toast = new bootstrap.Toast(toastElement, { delay: 5000 }); // Show for 5 seconds
+                  toast.show();
+                  // Remove the toast element from DOM after it's hidden
+                  toastElement.addEventListener('hidden.bs.toast', () => {
+                      toastElement.remove();
+                  });
+             }
+        } else {
+            console.warn("Toast container not found. Message:", message);
+        }
+    }
+
+
+    function handleError(errorData, status) {
+        let errorMsg = 'An unknown error occurred.';
+        // Prioritize error message from JSON response body
+        if (errorData && errorData.error) {
+            errorMsg = errorData.error;
+        } else if (status) {
+             errorMsg = `Request failed with status: ${status}`;
+        } else if (errorData instanceof Error) { // Handle actual JS errors
+            errorMsg = `Client-side error: ${errorData.message}`;
+        }
+        // Log the detailed error for debugging
+        console.error('Error:', errorMsg, 'Status:', status, 'Data:', errorData);
+
+        if (errorArea) errorArea.textContent = errorMsg;
+        if (messageArea) messageArea.textContent = ''; // Clear success messages
+        displayToast(errorMsg, 'error');
+
+        // Consider fetching current state if error handling implies backend state might be okay
+        // fetchState(); // Example: function to fetch /clean endpoint data again
+    }
+
+    // --- Main Action Function ---
+    async function performAction(url, method = 'POST', body = null) {
+        showLoading();
+        if (messageArea) messageArea.textContent = '';
+        if (errorArea) errorArea.textContent = '';
+
+        try {
+            const fetchOptions = {
+                method: method,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    // Add CSRF token header here if you implement CSRF protection
+                }
+            };
+            if (body) {
+                fetchOptions.body = JSON.stringify(body);
+            }
+
+            const response = await fetch(url, fetchOptions);
+
+            // Try to parse JSON regardless of status code for potential error messages
+             let responseData = {};
+             try {
+                 responseData = await response.json();
+             } catch (e) {
+                  // If parsing fails and status is not OK, create a generic error
+                 if (!response.ok) {
+                      throw { errorData: { error: `Server returned status ${response.status} with non-JSON response.` }, status: response.status };
+                  }
+                  // If parsing fails but status is OK, it's unexpected
+                  console.warn("Received OK status but failed to parse JSON response.");
+                  // Allow processing to continue if responseData is needed later, or throw error
+             }
+
+
+            if (!response.ok) {
+                 // Throw the parsed data (which might contain an 'error' key) and status
+                 throw { errorData: responseData, status: response.status };
+            }
+
+            // Handle successful response (which might still contain validation errors)
+            updateTableAndStatus(responseData);
+
+        } catch (errorInfo) {
+             // Catch errors from fetch itself or the thrown {errorData, status} object
+             handleError(errorInfo.errorData || errorInfo, errorInfo.status); // Pass parsed data or JS error
+        } finally {
+            hideLoading();
+        }
+    }
+
+    // --- Parameter Collection and Action Trigger ---
+    function handleSidebarClick(event) {
+        const button = event.target.closest('button[data-action]');
+        if (!button) return; // Exit if click wasn't on or inside a relevant button
+
+        const action = button.dataset.action;
+        let params = {};
+        let body = { operation: action, params: params };
+        let validationOk = true; // Flag for basic client-side validation
+
+        // Helper function to get element value or display warning
+        function getRequiredValue(elementId, paramName, isSelect = false, isMultiSelect = false) {
+            const element = document.getElementById(elementId);
+            if (!element) {
+                console.error(`Element with ID ${elementId} not found.`);
+                displayToast(`Configuration error: Control ${elementId} missing.`, 'error');
+                validationOk = false;
+                return null;
+            }
+            let value;
+            if (isMultiSelect) {
+                value = getSelectedOptions(element);
+                if (!value || value.length === 0) {
+                    displayToast(`Please select at least one option for ${paramName}.`, 'warning');
+                    validationOk = false; return null;
+                }
+            } else {
+                 value = element.value.trim();
+                 if (isSelect && !value) { // Check specifically for default disabled option
+                     displayToast(`Please select an option for ${paramName}.`, 'warning');
+                     validationOk = false; return null;
+                 }
+                 // Check if required and empty (basic check, doesn't cover placeholder text inputs well)
+                 if (element.required && !value && !isSelect) {
+                     displayToast(`Please enter a value for ${paramName}.`, 'warning');
+                     validationOk = false; return null;
+                 }
+            }
+             if (validationOk) params[paramName] = value;
+             return value; // Return value even if validation failed for potential further checks
+        }
+
+         function getOptionalValue(elementId, paramName, defaultValue = null) {
+             const element = document.getElementById(elementId);
+             if (element && element.value.trim()) {
+                 params[paramName] = element.value.trim();
+             } else if (defaultValue !== null) {
+                 params[paramName] = defaultValue;
+             }
+         }
+
+         function getCheckboxValue(elementId, paramName) {
+             const element = document.getElementById(elementId);
+             params[paramName] = element ? element.checked : false;
+         }
+
+
+        // --- Collect parameters based on action ---
+        try {
+            if (action === 'remove_duplicates') {
+                // Optional: Collect subset from a multi-select if added later
+                // params.subset = getSelectedOptions(document.getElementById('remove-duplicates-subset'));
+            }
+            else if (action === 'remove_missing') {
+                // Optional: Add 'how' select, 'subset' multi-select
+                 params.how = button.dataset.params ? JSON.parse(button.dataset.params).how : 'any'; // Get from button data- if exists
+            }
+            else if (action === 'fill_missing') {
+                getOptionalValue('fill-missing-column', 'column'); // Optional column
+                getRequiredValue('fill-missing-value', 'value'); // Value is required
+            }
+            else if (action === 'remove_spaces') {
+                getRequiredValue('remove-spaces-column', 'column', true);
+            }
+            else if (action === 'fix_datetime') {
+                 getRequiredValue('fix-datetime-column', 'column', true);
+                 getOptionalValue('fix-datetime-format', 'format');
+            }
+            else if (action === 'check_id_uniqueness') {
+                 getRequiredValue('check-id-uniqueness-column', 'column', true);
+            }
+            else if (action === 'check_id_format') {
+                 getRequiredValue('check-id-format-column', 'column', true);
+                 getRequiredValue('check-id-format-pattern', 'pattern');
+            }
+            else if (action === 'remove_outliers_iqr' || action === 'clip_outliers_iqr') {
+                 getRequiredValue('outlier-iqr-column', 'column', true);
+                 getOptionalValue('outlier-iqr-factor', 'factor', 1.5); // Provide default
+            }
+            else if (action === 'filter_rows') {
+                 getRequiredValue('filter-rows-column', 'column', true);
+                 getRequiredValue('filter-rows-condition', 'condition', true);
+                 getOptionalValue('filter-rows-action', 'action', 'keep');
+                 // Value is only required if condition is not isnull/notnull
+                 const conditionVal = document.getElementById('filter-rows-condition')?.value;
+                 if (conditionVal && !['isnull', 'notnull'].includes(conditionVal)) {
+                     getRequiredValue('filter-rows-value', 'value');
+                 } else {
+                      getOptionalValue('filter-rows-value', 'value'); // Still send if present
+                 }
+            }
+             else if (action === 'split_column') {
+                  getRequiredValue('split-column-column', 'column', true);
+                  getRequiredValue('split-column-delimiter', 'delimiter');
+                  getOptionalValue('split-column-new-names', 'new_column_names');
+            }
+             else if (action === 'combine_columns') {
+                  getRequiredValue('combine-columns-cols', 'columns_to_combine', false, true); // Multi-select
+                  getRequiredValue('combine-columns-new-name', 'new_column_name');
+                  getOptionalValue('combine-columns-separator', 'separator', ''); // Default empty separator
+             }
+             else if (action === 'change_dtype') {
+                  getRequiredValue('change-dtype-column', 'column', true);
+                  getRequiredValue('change-dtype-target-type', 'target_type', true);
+             }
+             else if (action === 'rename_column') {
+                  getRequiredValue('rename-column-old-name', 'old_name', true);
+                  getRequiredValue('rename-column-new-name', 'new_name');
+             }
+             else if (action === 'drop_columns') {
+                  getRequiredValue('drop-columns-cols', 'columns_to_drop', false, true); // Multi-select
+             }
+             else if (action === 'replace_text') {
+                  getRequiredValue('replace-text-column', 'column', true);
+                  // text_to_find can be empty string, so don't use getRequiredValue simple check
+                  const findInput = document.getElementById('replace-text-find');
+                  if(findInput) params.text_to_find = findInput.value; // Allow empty
+                  else { validationOk = false; displayToast("Find text input not found.", "error"); }
+
+                  getOptionalValue('replace-text-replace', 'replace_with', ''); // Default empty
+                  getCheckboxValue('replace-text-regex', 'use_regex');
+             }
+             else if (action === 'change_case') {
+                   getRequiredValue('change-case-column', 'column', true);
+                   getRequiredValue('change-case-type', 'case_type', true);
+             }
+             else if (action === 'map_values') {
+                    getRequiredValue('map-values-column', 'column', true);
+                    const mappingStr = getRequiredValue('map-values-dict', 'mapping_dict');
+                    if (mappingStr && validationOk) {
+                         try {
+                             params.mapping_dict = JSON.parse(mappingStr); // Parse JSON here
+                         } catch (e) {
+                             displayToast(`Invalid JSON provided for mapping: ${e.message}`, 'error');
+                             validationOk = false;
+                         }
+                    }
+             }
+             else if (action === 'sort_values') {
+                    getRequiredValue('sort-values-cols', 'columns_to_sort_by', false, true); // Multi-select
+                    const ascendingSelect = document.getElementById('sort-values-ascending');
+                    if (ascendingSelect) {
+                         params.ascending = ascendingSelect.value === 'true'; // Convert string 'true'/'false' to boolean
+                    } else { validationOk = false; }
+             }
+            // --- Add more `else if` blocks for future actions ---
+
+            else {
+                console.warn(`No parameter collection logic defined for action: ${action}`);
+                // Decide if this is an error or just continue with empty params
+            }
+
+        } catch (e) {
+            console.error("Error gathering parameters:", e);
+            displayToast("Client-side error getting parameters.", "error");
+            validationOk = false; // Prevent sending request
+        }
+
+
+        // Only proceed if basic client-side validation passed
+        if (validationOk) {
+             // Special endpoint check (e.g. for non-cleaning ops if added later)
+            // if (action === 'some_other_action') {
+            //    performAction('/other_endpoint', 'POST', body);
+            // } else {
+                 performAction('/clean_operation', 'POST', body);
+            // }
+        }
+    }
+
+    // --- Function to Fetch and Display Suggestions ---
+    async function fetchAndShowSuggestions() {
+        if (!suggestionsModal || !suggestionsListDiv || !suggestionsLoadingDiv || !suggestionsErrorDiv || !noSuggestionsMsg) {
+             console.error("Suggestion modal elements not found.");
+             displayToast("Could not initialize suggestions feature.", "error");
+             return;
+         }
+
+        // Show loading state in modal
+        suggestionsListDiv.innerHTML = ''; // Clear previous suggestions
+        suggestionsErrorDiv.style.display = 'none';
+        noSuggestionsMsg.style.display = 'none';
+        suggestionsLoadingDiv.style.display = 'block';
+        suggestionsModal.show(); // Show the modal
+
+        try {
+            const response = await fetch('/suggest_cleaning'); // GET request
+
+            // Try parsing JSON even if status is not OK
+            let data = {};
+            try {
+                 data = await response.json();
+            } catch (e) {
+                 if (!response.ok) throw new Error(`Server returned status ${response.status} with non-JSON response.`);
+                 // Handle case where status is OK but parsing failed (unlikely for GET)
+                 console.error("Failed to parse JSON from successful suggestions response", e);
+                 throw new Error("Received invalid data format from server.");
+            }
+
+            if (!response.ok) {
+                throw new Error(data.error || `Failed to fetch suggestions (Status: ${response.status})`);
+            }
+
+            suggestionsLoadingDiv.style.display = 'none'; // Hide loading
+
+            if (data.suggestions && data.suggestions.length > 0) {
+                 noSuggestionsMsg.style.display = 'none';
+                 displaySuggestions(data.suggestions);
+            } else {
+                 suggestionsListDiv.innerHTML = ''; // Ensure it's clear
+                 noSuggestionsMsg.style.display = 'block'; // Show no suggestions message
+            }
+
+        } catch (error) {
+            console.error("Error fetching suggestions:", error);
+            suggestionsLoadingDiv.style.display = 'none';
+            suggestionsErrorDiv.textContent = `Error loading suggestions: ${error.message}`;
+            suggestionsErrorDiv.style.display = 'block';
+            noSuggestionsMsg.style.display = 'none';
+            // Keep the modal open so the user sees the error
+        }
+    }
+
+    // --- Function to Render Suggestions in the Modal ---
+    function displaySuggestions(suggestions) {
+         if (!suggestionsListDiv) return;
+         suggestionsListDiv.innerHTML = ''; // Clear previous content
+
+         suggestions.forEach(sug => {
+             const item = document.createElement('div');
+             item.className = 'suggestion-item';
+
+             // Create action hint span if action exists
+             let actionHint = '';
+             if (sug.action && sug.action.length > 0) {
+                  // Simple hint, clicking doesn't do anything yet
+                  actionHint = `<span class="suggestion-action-hint" title="Suggested Tool(s): ${sug.action.join(', ')}">(Recommended action: ${sug.suggestion})</span>`;
+                  // TODO: Add click listener to highlight/scroll to the tool?
+             } else {
+                 actionHint = `<span>(${sug.suggestion})</span>`; // Show suggestion text if no direct action link
+             }
+
+
+             item.innerHTML = `
+                 <div><strong class="suggestion-issue">${sug.issue}</strong> ${sug.column !== '(Table-Wide)' ? `(Column: <code>${sug.column}</code>)` : ''}</div>
+                 <div class="suggestion-details">${sug.details}</div>
+                 <div>${actionHint}</div>
+             `;
+             suggestionsListDiv.appendChild(item);
+         });
+    }
+
+
+    // --- Event Listeners ---
+
+    // General listener for cleaning action buttons in the sidebar
+    if (sidebar) {
+        sidebar.addEventListener('click', handleSidebarClick);
+    } else {
+         console.error("Sidebar element not found.");
+    }
+
+
+    // Undo Button
+    if (undoBtn) {
+        undoBtn.addEventListener('click', () => {
+            performAction('/undo', 'POST'); // No body needed
+        });
+    }
+
+    // Redo Button
+    if (redoBtn) {
+        redoBtn.addEventListener('click', () => {
+            performAction('/redo', 'POST'); // No body needed
+        });
+    }
+
+    // Save Button
+    if (saveBtn) {
+        saveBtn.addEventListener('click', () => {
+             const filename = saveFilenameInput ? saveFilenameInput.value.trim() : '';
+             let body = {};
+             if (filename) body.filename = filename; // Only include if provided
+             performAction('/save', 'POST', body);
+        });
+    }
+
+    // Suggest Cleaning Button
+    if (suggestBtn) {
+        suggestBtn.addEventListener('click', fetchAndShowSuggestions);
+    }
+
+    // Auto Clean Button
+    if (autoCleanBtn) {
+        autoCleanBtn.addEventListener('click', () => {
+            // Optional: Add a confirmation dialog
+            if (confirm("Apply automatic cleaning steps?\n(This will trim whitespace, attempt safe type conversions, and standardize text case. Changes can be undone.)")) {
+                 performAction('/auto_clean', 'POST'); // Call the new endpoint
+            }
+        });
+    }
+
+    // --- Initial State Update (Optional) ---
+    // If you need to ensure counts/etc are updated on page load,
+    // you could make an initial fetch or parse the initial HTML
+    function updateInitialCounts() {
+        if(tableContainer){
+            const initialRows = tableContainer.querySelectorAll('tbody > tr');
+            rowCountSpan.textContent = `Rows: ${initialRows ? initialRows.length : 0} (Preview)`;
+        }
+         // Column count is usually correct from Flask template render
+    }
+    updateInitialCounts();
+
+}); // End DOMContentLoaded
